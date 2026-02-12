@@ -1,0 +1,37 @@
+name: "BoilerJuice Tank Monitor"
+version: "1.0.0"
+slug: "boilerjuice"
+description: "Monitor your BoilerJuice oil tank level with a modern web UI, CAPTCHA-aware login, and MQTT auto-discovery for Home Assistant sensors."
+url: "https://github.com/mylesagray/boilerjuice-tank-api"
+
+arch:
+  - amd64
+  - aarch64
+  - armv7
+
+init: false
+
+ingress: true
+ingress_port: 8099
+ingress_entry: /
+
+panel_icon: "mdi:oil"
+panel_title: "BoilerJuice"
+
+startup: application
+boot: auto
+
+map:
+  - type: data
+    read_only: false
+
+services:
+  - mqtt:want
+
+options: {}
+schema: {}
+
+environment:
+  DATA_DIR: /data
+  LOG_LEVEL: INFO
+  PORT: "8099"

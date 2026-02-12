@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>BoilerJuice Tank Monitor</title>
+  <link rel="stylesheet" href="static/style.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🛢️</text></svg>">
+</head>
+<body>
+
+<div class="toast-container" id="toastContainer"></div>
+
+<div class="app-container">
+
+  <!-- Header -->
+  <header class="app-header">
+    <div class="app-title">
+      <span class="icon">🛢️</span>
+      <span>BoilerJuice</span>
+    </div>
+    <div class="header-actions">
+      <span class="connection-badge disconnected" id="connectionBadge">
+        <span class="dot"></span>
+        <span id="connectionText">Not Connected</span>
+      </span>
+      <button class="icon-btn" id="themeToggle" title="Toggle theme">🌙</button>
+    </div>
+  </header>
+
+  <!-- Desktop nav (moves to bottom on mobile) -->
+  <nav class="bottom-nav" id="bottomNav">
+    <button class="nav-item active" data-section="dashboard">
+      <span class="nav-icon">📊</span>
+      <span>Dashboard</span>
+    </button>
+    <button class="nav-item" data-section="login">
+      <span class="nav-icon">🔐</span>
+      <span>Login</span>
+    </button>
+    <button class="nav-item" data-section="settings">
+      <span class="nav-icon">⚙️</span>
+      <span>Settings</span>
+    </button>
+  </nav>
+
+  <!-- ═══════ DASHBOARD SECTION ═══════ -->
+  <section class="section active" id="section-dashboard">
+
+    <!-- Empty state (before any data) -->
+    <div class="empty-state" id="emptyState">
+      <div class="empty-icon">🛢️</div>
+      <div class="empty-title">No Tank Data Yet</div>
+      <div class="empty-description">
+        Configure your BoilerJuice credentials in Settings, then log in to fetch your tank data.
+      </div>
+      <button class="btn btn-primary" onclick="switchSection('settings')">
+        <span class="btn-text">Go to Settings</span>
+      </button>
+    </div>
+
+    <!-- Tank data (shown when data exists) -->
+    <div id="tankDataView" style="display:none;">
+      <!-- Tank Visualization -->
+      <div class="tank-hero">
+        <div class="tank-container">
+          <div class="tank-cap"></div>
+          <div class="tank-body">
+            <div class="tank-fill high" id="tankFill" style="height: 0%;">
+            </div>
+            <div class="tank-percent-label">
+              <span id="tankPercentText">0</span><span class="unit">%</span>
+            </div>
+          </div>
+        </div>
+        <div class="tank-status">
+          <span class="level-name high" id="levelBadge">--</span>
+          <span class="last-updated" id="lastUpdated">Last updated: --</span>
+        </div>
+      </div>
+
+      <!-- Stats Grid -->
+      <div class="stats-grid">
+        <div class="stat-card">
+          <span class="stat-label">Usable Oil</span>
+          <span class="stat-value"><span id="statLitres">--</span></span>
+          <span class="stat-unit">litres</span>
+        </div>
+        <div class="stat-card">
+          <span class="stat-label">Total Oil</span>
+          <span class="stat-value"><span id="statTotalLitres">--</span></span>
+          <span class="stat-unit">litres</span>
+        </div>
+        <div class="stat-card">
+          <span class="stat-label">Capacity</span>
+          <span class="stat-value"><span id="statCapacity">--</span></span>
+          <span class="stat-unit">litres</span>
+        </div>
+        <div class="stat-card">
+          <span class="stat-label">Total Level</span>
+          <span class="stat-value"><span id="statTotalPercent">--</span></span>
+          <span class="stat-unit">percent</span>
+        </div>
+      </div>
+
+      <!-- Actions -->
+      <div class="action-bar">
+        <button class="btn btn-primary btn-block" id="refreshBtn" onclick="refreshData()">
+          <span class="spinner"></span>
+          <span class="btn-text">↻ Refresh Now</span>
+        </button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══════ LOGIN SECTION (Remote Browser) ═══════ -->
+  <section class="section" id="section-login">
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">🔐 BoilerJuice Login</span>
+      </div>
+
+      <div class="auth-instructions">
+        <strong>How it works:</strong> BoilerJuice uses CAPTCHA protection. Click
+        <em>Start Login</em> below to open a browser session. You'll see the BoilerJuice
+        page as a screenshot — click on it to interact (solve CAPTCHAs, fill forms).
+        Once logged in, the session is saved for automatic data fetching.
+      </div>
+
+      <div class="auth-status info" id="authStatus">
+        <span class="status-dot"></span>
+        <span id="authStatusText">Ready to connect</span>
+      </div>
+
+      <!-- Controls -->
+      <div style="display:flex; gap:10px; flex-wrap:wrap; margin-bottom:16px;">
+        <button class="btn btn-primary" id="startAuthBtn" onclick="startAuth()">
+          <span class="spinner"></span>
+          <span class="btn-text">Start Login</span>
+        </button>
+        <button class="btn btn-secondary" id="autoFillBtn" onclick="autoFillLogin()" style="display:none;">
+          <span class="btn-text">Auto-fill Credentials</span>
+        </button>
+        <button class="btn btn-secondary" id="fetchAfterAuthBtn" onclick="fetchAfterAuth()" style="display:none;">
+          <span class="btn-text">✓ Fetch Tank Data</span>
+        </button>
+      </div>
+
+      <!-- Remote Browser View -->
+      <div class="remote-browser" id="remoteBrowser" style="display:none;">
+        <img id="browserScreenshot" alt="Browser view" onclick="handleBrowserClick(event)">
+        <div class="overlay" id="browserOverlay">
+          <span>Loading browser...</span>
+        </div>
+      </div>
+
+      <p class="form-hint" id="browserHint" style="display:none;">
+        Click on the screenshot above to interact with the page. After solving the CAPTCHA
+        and reaching the login form, click "Auto-fill Credentials" to enter your details automatically.
+      </p>
+    </div>
+  </section>
+
+  <!-- ═══════ SETTINGS SECTION ═══════ -->
+  <section class="section" id="section-settings">
+
+    <!-- BoilerJuice Credentials -->
+    <div class="settings-section">
+      <div class="section-title">BoilerJuice Account</div>
+      <div class="card">
+        <div class="form-group">
+          <label class="form-label" for="bjEmail">Email Address</label>
+          <input class="form-input" type="email" id="bjEmail"
+                 placeholder="your@email.com" autocomplete="email">
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="bjPassword">Password</label>
+          <div class="input-group">
+            <input class="form-input" type="password" id="bjPassword"
+                   placeholder="••••••••" autocomplete="current-password">
+            <button class="toggle-password" onclick="togglePassword('bjPassword', this)"
+                    type="button">👁️</button>
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="bjTankId">Tank ID</label>
+          <input class="form-input" type="text" id="bjTankId"
+                 placeholder="e.g. 123456">
+          <p class="form-hint">
+            Find this in your BoilerJuice tank page URL:
+            boilerjuice.com/uk/users/tanks/<strong>XXXXX</strong>/edit
+          </p>
+        </div>
+      </div>
+    </div>
+
+    <!-- Refresh Settings -->
+    <div class="settings-section">
+      <div class="section-title">Data Refresh</div>
+      <div class="card">
+        <div class="form-group">
+          <label class="form-label" for="refreshInterval">Auto-refresh Interval</label>
+          <select class="form-input form-select" id="refreshInterval">
+            <option value="15">Every 15 minutes</option>
+            <option value="30">Every 30 minutes</option>
+            <option value="60" selected>Every 1 hour</option>
+            <option value="120">Every 2 hours</option>
+            <option value="240">Every 4 hours</option>
+            <option value="0">Disabled (manual only)</option>
+          </select>
+        </div>
+      </div>
+    </div>
+
+    <!-- MQTT Settings -->
+    <div class="settings-section">
+      <div class="section-title">MQTT Integration (Optional)</div>
+      <div class="card">
+        <div class="form-group">
+          <label class="form-label" for="mqttEnabled">
+            <input type="checkbox" id="mqttEnabled" style="width:auto; margin-right:8px;">
+            Enable MQTT Auto-Discovery
+          </label>
+          <p class="form-hint">
+            Publishes tank data as Home Assistant sensors via MQTT auto-discovery.
+          </p>
+        </div>
+        <div id="mqttFields" style="display:none;">
+          <div class="form-group">
+            <label class="form-label" for="mqttHost">MQTT Broker Host</label>
+            <input class="form-input" type="text" id="mqttHost"
+                   placeholder="core-mosquitto or 192.168.1.x" value="core-mosquitto">
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="mqttPort">MQTT Port</label>
+            <input class="form-input" type="number" id="mqttPort"
+                   placeholder="1883" value="1883">
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="mqttUser">MQTT Username (optional)</label>
+            <input class="form-input" type="text" id="mqttUser" placeholder="mqtt_user">
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="mqttPassword">MQTT Password (optional)</label>
+            <div class="input-group">
+              <input class="form-input" type="password" id="mqttPassword" placeholder="••••••••">
+              <button class="toggle-password" onclick="togglePassword('mqttPassword', this)"
+                      type="button">👁️</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Save Button -->
+    <div class="action-bar">
+      <button class="btn btn-primary btn-block" id="saveSettingsBtn" onclick="saveSettings()">
+        <span class="spinner"></span>
+        <span class="btn-text">Save Settings</span>
+      </button>
+    </div>
+
+  </section>
+
+</div>
+
+<script src="static/app.js"></script>
+</body>
+</html>
