@@ -404,13 +404,14 @@ class BoilerJuiceScraper:
 
     # ── Data fetching ───────────────────────────────────────────────
 
-    async def fetch_tank_data(self, tank_id: str, user_capacity: float = 0) -> dict:
-        """Fetch tank data from BoilerJuice.
+    def fetch_tank_data_sync(self, tank_id: str, user_capacity: float = 0) -> dict:
+        """Fetch tank data from BoilerJuice (synchronous — call from a thread).
 
         Args:
             tank_id: BoilerJuice tank ID.
             user_capacity: User-configured tank capacity in litres.
         """
+        import time
         try:
             self._ensure_driver()
 
@@ -418,7 +419,6 @@ class BoilerJuiceScraper:
             logger.info("Fetching tank data from %s", tank_url)
 
             self._driver.get(tank_url)
-            import time
             time.sleep(3)
 
             html = self._driver.page_source
@@ -568,14 +568,16 @@ class BoilerJuiceScraper:
                     pass
 
             # Regex fallback on full page text
+            # NOTE: The edit page contains dropdown options like "800 litres or less"
+            # and manufacturer names like "Balmoral 2000L" — patterns must be
+            # specific enough to avoid matching those.
             if not data.get("litres"):
                 litre_patterns = [
                     r"([\d,]+\.?\d*)\s*litres?\s+(?:of\s+)?(?:usable\s+)?(?:oil\s+)?remaining",
                     r"([\d,]+\.?\d*)\s*litres?\s+(?:of\s+)?(?:usable|remaining|total)\s+oil",
                     r"(?:you have|remaining|oil level)[:\s]+([\d,]+\.?\d*)\s*(?:litres?|L)",
                     r"(?:usable|remaining|total)\s+(?:oil)?[:\s]*([\d,]+\.?\d*)\s*(?:litres?|L)",
-                    r"([\d,]+\.?\d*)\s*(?:litres?|L)\s+(?:of\s+)?oil",
-                    r"([\d,]+\.?\d*)\s*L\b",
+                    r"([\d,]+\.?\d*)\s*(?:litres?|L)\s+of\s+oil",
                 ]
                 for p in litre_patterns:
                     m = re.search(p, text, re.IGNORECASE)
@@ -605,19 +607,11 @@ class BoilerJuiceScraper:
                 except Exception:
                     pass
 
+            # Skip text regex for capacity — the edit page contains dropdown
+            # options ("800 litres or less", "1000-1199") that would give
+            # false matches. Rely on data attributes or user config instead.
             if not data.get("scraped_capacity"):
-                cap_patterns = [
-                    r"(?:tank\s+)?capacity[:\s]+([\d,]+\.?\d*)\s*(?:litres?|L)?",
-                    r"tank\s+size[:\s]+([\d,]+\.?\d*)",
-                    r"([\d,]+\.?\d*)\s*(?:litres?\s+)?(?:tank\s+)?capacity",
-                ]
-                for p in cap_patterns:
-                    m = re.search(p, text, re.IGNORECASE)
-                    if m:
-                        val = float(m.group(1).replace(",", ""))
-                        if val > 0:
-                            data["scraped_capacity"] = val
-                            logger.info("Found page capacity via regex '%s': %s", p, val)
+                logger.info("No capacity found via selectors; will use user config")
                             break
 
             # ── 4. Look for JSON/JS data embedded in script tags ──

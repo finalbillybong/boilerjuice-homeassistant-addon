@@ -177,7 +177,7 @@ async def api_refresh(request):
         return web.json_response({"success": False, "error": "Tank ID not configured. Go to Settings."})
 
     user_capacity = float(config.get("tank_capacity", 0) or 0)
-    result = await scraper.fetch_tank_data(tank_id, user_capacity=user_capacity)
+    result = await run_fetch_in_thread(tank_id, user_capacity)
 
     if result.get("success") and config.get("mqtt_enabled"):
         try:
@@ -269,8 +269,22 @@ async def api_health(request):
 # Background auto-refresh
 # ═══════════════════════════════════════════════════════════
 
+async def run_fetch_in_thread(tank_id: str, user_capacity: float) -> dict:
+    """Run the synchronous Selenium fetch in a thread so it doesn't block
+    the aiohttp event loop (Selenium is entirely synchronous)."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(
+        None,  # default ThreadPoolExecutor
+        lambda: scraper.fetch_tank_data_sync(tank_id, user_capacity),
+    )
+
+
 async def auto_refresh_loop():
     """Background loop that periodically fetches tank data."""
+    # Wait for the web server to fully start before doing anything
+    await asyncio.sleep(10)
+    logger.info("Auto-refresh loop started (initial 10s delay done)")
+
     while True:
         try:
             config = load_config()
@@ -286,7 +300,7 @@ async def auto_refresh_loop():
 
             user_capacity = float(config.get("tank_capacity", 0) or 0)
             logger.info("Auto-refresh: fetching tank data")
-            result = await scraper.fetch_tank_data(tank_id, user_capacity=user_capacity)
+            result = await run_fetch_in_thread(tank_id, user_capacity)
 
             if result.get("success"):
                 logger.info("Auto-refresh: data fetched successfully")
