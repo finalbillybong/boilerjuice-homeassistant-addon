@@ -5,7 +5,7 @@ FROM ${BUILD_FROM}
 RUN apk add --no-cache \
     python3 \
     py3-pip \
-    bash \
+    py3-aiohttp \
     chromium \
     chromium-chromedriver \
     nss \
@@ -19,24 +19,19 @@ RUN apk add --no-cache \
 ENV CHROME_BIN=/usr/bin/chromium-browser
 ENV CHROMEDRIVER_PATH=/usr/bin/chromedriver
 
-# Create app directory
-WORKDIR /app
+# Copy application
+COPY app /app
 
 # Install Python dependencies
-COPY requirements.txt .
-RUN pip3 install --no-cache-dir --break-system-packages -r requirements.txt
-
-# Copy application
-COPY app/ ./
+RUN pip3 install --no-cache-dir --break-system-packages \
+    selenium==4.27.1 \
+    paho-mqtt==2.1.0
 
 # Labels
 LABEL \
-    io.hass.version="1.0.2" \
+    io.hass.version="1.0.5" \
     io.hass.type="addon" \
     io.hass.arch="amd64|aarch64|armv7"
-
-# Expose ingress port
-EXPOSE 8099
 
 # Copy run script
 COPY run.sh /
