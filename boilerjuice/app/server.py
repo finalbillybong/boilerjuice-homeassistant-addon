@@ -171,6 +171,9 @@ async def api_get_status(request):
 
 
 async def api_refresh(request):
+    # User explicitly asked for data — end any auth flow
+    scraper._auth_in_progress = False
+
     config = load_config()
     tank_id = config.get("tank_id", "")
     if not tank_id:
@@ -287,6 +290,13 @@ async def auto_refresh_loop():
 
     while True:
         try:
+            # NEVER fetch while the user is doing the login/CAPTCHA flow —
+            # both share the same browser instance and would collide.
+            if scraper.is_auth_in_progress:
+                logger.info("Auto-refresh: skipping — auth in progress")
+                await asyncio.sleep(15)
+                continue
+
             config = load_config()
             interval = config.get("refresh_interval", 60)
             if interval <= 0:
