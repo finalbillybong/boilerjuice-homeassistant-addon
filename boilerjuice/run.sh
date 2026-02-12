@@ -1,5 +1,6 @@
-#!/usr/bin/with-contenv bashio
+#!/bin/bash
+set -e
 
-bashio::log.info "Starting BoilerJuice Tank Monitor..."
+echo "[INFO] Starting BoilerJuice Tank Monitor..."
 
 exec python3 /app/server.py
