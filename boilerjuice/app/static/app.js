@@ -122,6 +122,7 @@ async function loadConfig() {
       // Populate fields
       if (config.email) document.getElementById("bjEmail").value = config.email;
       if (config.tank_id) document.getElementById("bjTankId").value = config.tank_id;
+      if (config.tank_capacity) document.getElementById("bjTankCapacity").value = config.tank_capacity;
       if (config.refresh_interval != null) {
         document.getElementById("refreshInterval").value = config.refresh_interval;
       }
@@ -150,6 +151,7 @@ async function saveSettings() {
   const payload = {
     email: document.getElementById("bjEmail").value.trim(),
     tank_id: document.getElementById("bjTankId").value.trim(),
+    tank_capacity: parseInt(document.getElementById("bjTankCapacity").value) || 0,
     refresh_interval: parseInt(document.getElementById("refreshInterval").value),
     mqtt_enabled: document.getElementById("mqttEnabled").checked,
     mqtt_host: document.getElementById("mqttHost").value.trim(),
@@ -229,10 +231,9 @@ function updateDashboard(data) {
 
   // Stats
   document.getElementById("statLitres").textContent = formatNum(data.litres);
-  document.getElementById("statTotalLitres").textContent = formatNum(data.total_litres);
-  document.getElementById("statCapacity").textContent = formatNum(data.capacity);
-  document.getElementById("statTotalPercent").textContent =
-    Math.round(data.total_percent || 0) + "%";
+  document.getElementById("statPercent").textContent = pct + "%";
+  document.getElementById("statCapacity").textContent =
+    data.capacity ? formatNum(data.capacity) : "--";
 
   // Timestamp
   if (data.timestamp) {

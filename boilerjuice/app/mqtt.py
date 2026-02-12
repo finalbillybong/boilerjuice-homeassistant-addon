@@ -34,8 +34,8 @@ AVAILABILITY_TOPIC = "boilerjuice/tank/availability"
 # Sensor definitions for auto-discovery
 SENSORS = [
     {
-        "object_id": "oil_level",
-        "name": "Oil Level",
+        "object_id": "oil_remaining",
+        "name": "Oil Remaining",
         "value_key": "litres",
         "unit": "L",
         "device_class": "volume_storage",
@@ -44,26 +44,8 @@ SENSORS = [
     },
     {
         "object_id": "oil_percentage",
-        "name": "Oil Percentage",
+        "name": "Oil Level",
         "value_key": "percent",
-        "unit": "%",
-        "device_class": None,
-        "icon": "mdi:gauge",
-        "state_class": "measurement",
-    },
-    {
-        "object_id": "total_oil_level",
-        "name": "Total Oil Level",
-        "value_key": "total_litres",
-        "unit": "L",
-        "device_class": "volume_storage",
-        "icon": "mdi:oil",
-        "state_class": "measurement",
-    },
-    {
-        "object_id": "total_oil_percentage",
-        "name": "Total Oil Percentage",
-        "value_key": "total_percent",
         "unit": "%",
         "device_class": None,
         "icon": "mdi:gauge",

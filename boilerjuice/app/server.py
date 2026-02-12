@@ -140,7 +140,7 @@ async def api_set_config(request):
         config = load_config()
 
         for key in [
-            "email", "tank_id", "refresh_interval",
+            "email", "tank_id", "tank_capacity", "refresh_interval",
             "mqtt_enabled", "mqtt_host", "mqtt_port", "mqtt_user",
         ]:
             if key in body:
@@ -176,7 +176,8 @@ async def api_refresh(request):
     if not tank_id:
         return web.json_response({"success": False, "error": "Tank ID not configured. Go to Settings."})
 
-    result = await scraper.fetch_tank_data(tank_id)
+    user_capacity = float(config.get("tank_capacity", 0) or 0)
+    result = await scraper.fetch_tank_data(tank_id, user_capacity=user_capacity)
 
     if result.get("success") and config.get("mqtt_enabled"):
         try:
@@ -283,8 +284,9 @@ async def auto_refresh_loop():
                 await asyncio.sleep(60)
                 continue
 
+            user_capacity = float(config.get("tank_capacity", 0) or 0)
             logger.info("Auto-refresh: fetching tank data")
-            result = await scraper.fetch_tank_data(tank_id)
+            result = await scraper.fetch_tank_data(tank_id, user_capacity=user_capacity)
 
             if result.get("success"):
                 logger.info("Auto-refresh: data fetched successfully")
