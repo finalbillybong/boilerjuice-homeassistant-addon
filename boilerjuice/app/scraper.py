@@ -479,41 +479,42 @@ class BoilerJuiceScraper:
             return {"success": False, "error": str(e)}
 
     def _extract_tank_data(self, user_capacity: float = 0) -> Optional[TankData]:
-        """Try to extract tank data from the current page.
+        """Extract the tank fill percentage from the page, then calculate
+        remaining litres from the user-configured tank capacity.
 
-        Args:
-            user_capacity: Tank capacity (litres) from user settings.
-                           Used as the authoritative capacity value,
-                           and to calculate litres from percent if needed.
+        We ONLY scrape the percentage — BoilerJuice's page is full of
+        misleading numbers (dropdown options, model names like "Balmoral 2000L")
+        that break litre/capacity regex matching.  The user sets their real
+        tank capacity in Settings and we do the simple maths:
+
+            litres = capacity * percent / 100
         """
         try:
-            html = self._driver.page_source
             try:
                 text = self._driver.find_element(By.TAG_NAME, "body").text
             except Exception:
                 text = ""
 
-            # Debug: log what we see on the page so we can troubleshoot
-            logger.info("=== PAGE TEXT (first 1000 chars) ===\n%s", text[:1000])
-            logger.info("=== PAGE URL: %s ===", self._driver.current_url)
+            logger.info("Page URL: %s", self._driver.current_url)
+            logger.debug("Page text (first 500 chars): %s", text[:500])
 
-            data = {}
+            # ── Find percentage ───────────────────────────────────
+            percent = 0.0
 
-            # ── 1. Extract percentage ──────────────────────────────
-            # Try data attributes first
+            # Method 1: data-percentage attribute (most reliable)
             try:
                 el = self._driver.find_element(By.CSS_SELECTOR, "[data-percentage]")
                 pct = el.get_attribute("data-percentage")
                 if pct:
-                    data["percent"] = float(pct)
-                    logger.info("Found percent via data-percentage attr: %s", pct)
+                    percent = float(pct)
+                    logger.info("Found percent via data-percentage attr: %s", percent)
             except Exception:
                 pass
 
-            if not data.get("percent"):
-                # Try extracting from page text
+            # Method 2: regex on page text
+            if not percent:
                 pct_patterns = [
-                    r"(\d+(?:\.\d+)?)\s*%\s*(?:full|level|remaining)?",
+                    r"(\d+(?:\.\d+)?)\s*%\s*(?:full|level|remaining)",
                     r"(?:level|percentage|percent)[:\s]+(\d+(?:\.\d+)?)",
                     r"(\d+(?:\.\d+)?)\s*%",
                 ]
@@ -522,170 +523,39 @@ class BoilerJuiceScraper:
                     if m:
                         val = float(m.group(1))
                         if 0 < val <= 100:
-                            data["percent"] = val
-                            logger.info("Found percent via regex '%s': %s", p, val)
+                            percent = val
+                            logger.info("Found percent via regex: %s", percent)
                             break
 
-            # ── 2. Extract litres (remaining oil) ─────────────────
-            # Try various selectors for oil amount
-            litre_selectors = [
-                "#usable-oil", "[id*='usable-oil']",
-                "#total-oil", "[id*='total-oil']",
-                "#remaining-oil", "[id*='remaining']",
-                "[id*='oil-level']", "[id*='litres']",
-                "[class*='oil-level']", "[class*='litres']",
-                "[data-litres]", "[data-oil]", "[data-remaining]",
-            ]
-            for selector in litre_selectors:
-                try:
-                    el = self._driver.find_element(By.CSS_SELECTOR, selector)
-                    # Check data attributes first
-                    for attr in ["data-litres", "data-oil", "data-remaining", "data-value"]:
-                        val = el.get_attribute(attr)
-                        if val:
-                            try:
-                                data["litres"] = float(val.replace(",", ""))
-                                logger.info("Found litres via %s[%s]: %s", selector, attr, val)
-                                break
-                            except ValueError:
-                                pass
-                    if data.get("litres"):
-                        break
-                    # Check text content
-                    el_text = el.text
-                    m = re.search(r"([\d,]+\.?\d*)\s*(?:litres?|L)", el_text, re.IGNORECASE)
-                    if m:
-                        data["litres"] = float(m.group(1).replace(",", ""))
-                        logger.info("Found litres via %s text: %s", selector, m.group(1))
-                        break
-                    # Just a number?
-                    m = re.search(r"([\d,]+\.?\d+)", el_text)
-                    if m and float(m.group(1).replace(",", "")) > 0:
-                        data["litres"] = float(m.group(1).replace(",", ""))
-                        logger.info("Found litres via %s numeric text: %s", selector, m.group(1))
-                        break
-                except Exception:
-                    pass
+            if not percent:
+                logger.warning("Could not find percentage on page")
+                return None
 
-            # Regex fallback on full page text
-            # NOTE: The edit page contains dropdown options like "800 litres or less"
-            # and manufacturer names like "Balmoral 2000L" — patterns must be
-            # specific enough to avoid matching those.
-            if not data.get("litres"):
-                litre_patterns = [
-                    r"([\d,]+\.?\d*)\s*litres?\s+(?:of\s+)?(?:usable\s+)?(?:oil\s+)?remaining",
-                    r"([\d,]+\.?\d*)\s*litres?\s+(?:of\s+)?(?:usable|remaining|total)\s+oil",
-                    r"(?:you have|remaining|oil level)[:\s]+([\d,]+\.?\d*)\s*(?:litres?|L)",
-                    r"(?:usable|remaining|total)\s+(?:oil)?[:\s]*([\d,]+\.?\d*)\s*(?:litres?|L)",
-                    r"([\d,]+\.?\d*)\s*(?:litres?|L)\s+of\s+oil",
-                ]
-                for p in litre_patterns:
-                    m = re.search(p, text, re.IGNORECASE)
-                    if m:
-                        val = float(m.group(1).replace(",", ""))
-                        if val > 0:
-                            data["litres"] = val
-                            logger.info("Found litres via text regex '%s': %s", p, val)
-                            break
+            # ── Calculate litres from capacity ────────────────────
+            capacity = user_capacity
+            litres = round(capacity * percent / 100, 1) if capacity > 0 else 0
 
-            # ── 3. Extract capacity from page (informational) ─────
-            cap_selectors = [
-                "input[title='tank-size-count']", "[data-tank-size]",
-                "[data-capacity]", "[class*='capacity']",
-                "input[name*='capacity']", "input[name*='tank_size']",
-            ]
-            for selector in cap_selectors:
-                try:
-                    el = self._driver.find_element(By.CSS_SELECTOR, selector)
-                    val = el.get_attribute("value") or el.get_attribute("data-capacity") or el.get_attribute("data-tank-size")
-                    if val:
-                        scraped_cap = float(val.replace(",", ""))
-                        if scraped_cap > 0:
-                            data["scraped_capacity"] = scraped_cap
-                            logger.info("Found page capacity via %s: %s", selector, scraped_cap)
-                            break
-                except Exception:
-                    pass
+            if capacity > 0:
+                logger.info("Calculated: %.0f L capacity x %.1f%% = %.1f L remaining",
+                            capacity, percent, litres)
+            else:
+                logger.warning("No tank capacity configured — set it in Settings "
+                               "to see Oil Remaining in litres")
 
-            # Skip text regex for capacity — the edit page contains dropdown
-            # options ("800 litres or less", "1000-1199") that would give
-            # false matches. Rely on data attributes or user config instead.
-            if not data.get("scraped_capacity"):
-                logger.info("No capacity found via selectors; will use user config")
-                            break
+            # ── Level name ────────────────────────────────────────
+            if percent >= 60:
+                level_name = "High"
+            elif percent >= 30:
+                level_name = "Medium"
+            else:
+                level_name = "Low"
 
-            # ── 4. Look for JSON/JS data embedded in script tags ──
-            try:
-                scripts = self._driver.find_elements(By.TAG_NAME, "script")
-                for script in scripts:
-                    script_text = script.get_attribute("innerHTML") or ""
-                    if not script_text.strip():
-                        continue
-                    # Look for tank-related JSON objects
-                    json_matches = re.findall(
-                        r'\{[^{}]*(?:litres?|oil|tank|level|percent|remaining)[^{}]*\}',
-                        script_text, re.IGNORECASE
-                    )
-                    for json_str in json_matches:
-                        try:
-                            json_data = json.loads(json_str)
-                            for key in ["litres", "liters", "remaining", "oil_level", "oilLevel"]:
-                                if key in json_data and not data.get("litres"):
-                                    data["litres"] = float(json_data[key])
-                                    logger.info("Found litres in script JSON key '%s': %s", key, data["litres"])
-                            for key in ["capacity", "tank_capacity", "tankCapacity", "tank_size"]:
-                                if key in json_data and not data.get("scraped_capacity"):
-                                    data["scraped_capacity"] = float(json_data[key])
-                                    logger.info("Found capacity in script JSON key '%s': %s", key, data["scraped_capacity"])
-                            for key in ["percent", "percentage", "level"]:
-                                if key in json_data and not data.get("percent"):
-                                    data["percent"] = float(json_data[key])
-                                    logger.info("Found percent in script JSON key '%s': %s", key, data["percent"])
-                        except (json.JSONDecodeError, ValueError, TypeError):
-                            pass
-            except Exception:
-                pass
-
-            # ── 5. Determine final values ─────────────────────────
-            # Use user-configured capacity; fall back to scraped
-            capacity = user_capacity if user_capacity > 0 else data.get("scraped_capacity", 0)
-
-            percent = data.get("percent", 0)
-            litres = data.get("litres", 0)
-
-            # Calculate missing values from what we have
-            if not litres and percent > 0 and capacity > 0:
-                litres = round(capacity * percent / 100, 1)
-                logger.info("Calculated litres from percent(%.1f) * capacity(%.0f) = %.1f", percent, capacity, litres)
-
-            if not percent and litres > 0 and capacity > 0:
-                percent = round(litres / capacity * 100, 1)
-                logger.info("Calculated percent from litres(%.1f) / capacity(%.0f) = %.1f%%", litres, capacity, percent)
-
-            if not capacity and litres > 0 and percent > 0:
-                capacity = round(litres / (percent / 100), 0)
-                logger.info("Calculated capacity from litres(%.1f) / percent(%.1f%%) = %.0f", litres, percent, capacity)
-
-            logger.info("Final extracted data: litres=%.1f, percent=%.1f, capacity=%.0f", litres, percent, capacity)
-
-            # Check if we got meaningful data
-            if litres > 0 or percent > 0:
-                if percent >= 60:
-                    level_name = "High"
-                elif percent >= 30:
-                    level_name = "Medium"
-                else:
-                    level_name = "Low"
-
-                return TankData(
-                    litres=litres,
-                    percent=percent,
-                    capacity=capacity,
-                    level_name=level_name,
-                )
-
-            logger.warning("Could not extract any tank data from page")
-            return None
+            return TankData(
+                litres=litres,
+                percent=percent,
+                capacity=capacity,
+                level_name=level_name,
+            )
 
         except Exception as e:
             logger.error("Tank data extraction failed: %s", e)
