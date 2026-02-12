@@ -328,6 +328,17 @@ async def on_cleanup(app):
     scraper.close()
 
 
+async def catch_all_get(request):
+    """Catch-all: serve index.html for any unmatched GET request.
+    
+    HA Ingress sometimes sends paths like //// instead of /.
+    This catch-all ensures the UI is always served regardless of
+    extra slashes or unexpected paths.
+    """
+    logger.info("Catch-all serving index.html for path: %s", request.path)
+    return await handle_index(request)
+
+
 def create_app():
     app = web.Application()
 
@@ -359,6 +370,9 @@ def create_app():
 
     # Health
     app.router.add_get("/api/health", api_health)
+
+    # Catch-all for any unmatched GET (must be last)
+    app.router.add_get("/{path:.*}", catch_all_get)
 
     return app
 
