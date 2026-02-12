@@ -13,6 +13,7 @@ State topic:
 
 import json
 import logging
+import time
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -20,10 +21,16 @@ logger = logging.getLogger(__name__)
 # Try importing paho-mqtt (optional dependency)
 try:
     import paho.mqtt.client as mqtt_client
-    import paho.mqtt.publish as mqtt_publish
     MQTT_AVAILABLE = True
+    # paho-mqtt 2.x requires CallbackAPIVersion
+    try:
+        from paho.mqtt.enums import CallbackAPIVersion
+        PAHO_V2 = True
+    except ImportError:
+        PAHO_V2 = False
 except ImportError:
     MQTT_AVAILABLE = False
+    PAHO_V2 = False
     logger.warning("paho-mqtt not installed — MQTT integration disabled")
 
 
@@ -68,7 +75,7 @@ DEVICE_INFO = {
     "name": "BoilerJuice Oil Tank",
     "manufacturer": "BoilerJuice",
     "model": "Oil Tank Monitor",
-    "sw_version": "1.0.0",
+    "sw_version": "1.1.1",
 }
 
 
@@ -84,19 +91,41 @@ def _get_mqtt_client(config: dict) -> Optional["mqtt_client.Client"]:
     password = config.get("mqtt_password", "")
 
     try:
-        client = mqtt_client.Client(
-            client_id="boilerjuice-addon",
-            protocol=mqtt_client.MQTTv311,
-        )
+        # paho-mqtt 2.x requires CallbackAPIVersion
+        if PAHO_V2:
+            client = mqtt_client.Client(
+                callback_api_version=CallbackAPIVersion.VERSION2,
+                client_id="boilerjuice-addon",
+                protocol=mqtt_client.MQTTv311,
+            )
+        else:
+            client = mqtt_client.Client(
+                client_id="boilerjuice-addon",
+                protocol=mqtt_client.MQTTv311,
+            )
+
         if user:
             client.username_pw_set(user, password)
 
         client.connect(host, port, keepalive=60)
+        # Start the network loop so QoS 1 publishes are actually sent
+        client.loop_start()
         return client
 
     except Exception as e:
         logger.error("MQTT connection failed: %s", e)
         return None
+
+
+def _disconnect(client):
+    """Cleanly stop the network loop and disconnect."""
+    try:
+        # Give a moment for queued messages to be sent
+        time.sleep(0.5)
+        client.loop_stop()
+        client.disconnect()
+    except Exception:
+        pass
 
 
 def publish_discovery(config: dict):
@@ -118,6 +147,7 @@ def publish_discovery(config: dict):
             payload = {
                 "name": sensor["name"],
                 "unique_id": f"boilerjuice_{sensor['object_id']}",
+                "object_id": f"boilerjuice_{sensor['object_id']}",
                 "state_topic": STATE_TOPIC,
                 "value_template": f"{{{{ value_json.{sensor['value_key']} }}}}",
                 "unit_of_measurement": sensor["unit"],
@@ -133,37 +163,39 @@ def publish_discovery(config: dict):
             if sensor["state_class"]:
                 payload["state_class"] = sensor["state_class"]
 
-            client.publish(
+            result = client.publish(
                 discovery_topic,
                 json.dumps(payload),
                 retain=True,
                 qos=1,
             )
-            logger.info("Published discovery: %s", discovery_topic)
+            result.wait_for_publish()
+            logger.info("Published discovery: %s (rc=%s)", discovery_topic, result.rc)
 
         # Publish availability
-        client.publish(AVAILABILITY_TOPIC, "online", retain=True, qos=1)
+        result = client.publish(AVAILABILITY_TOPIC, "online", retain=True, qos=1)
+        result.wait_for_publish()
 
-        client.disconnect()
+        _disconnect(client)
         logger.info("MQTT auto-discovery published successfully")
         return True
 
     except Exception as e:
         logger.error("MQTT discovery publish failed: %s", e)
-        try:
-            client.disconnect()
-        except Exception:
-            pass
+        _disconnect(client)
         return False
 
 
 def publish_tank_data(config: dict, data: dict):
     """
-    Publish tank data to the MQTT state topic.
-    Call this after each successful data fetch.
+    Publish discovery config (if not yet done) and tank state data.
+    Called after each successful data fetch.
     """
     if not config.get("mqtt_enabled"):
         return
+
+    # Always publish discovery first to ensure HA knows about our sensors
+    publish_discovery(config)
 
     client = _get_mqtt_client(config)
     if not client:
@@ -171,26 +203,25 @@ def publish_tank_data(config: dict, data: dict):
 
     try:
         # Publish state
-        client.publish(
+        result = client.publish(
             STATE_TOPIC,
             json.dumps(data),
             retain=True,
             qos=1,
         )
+        result.wait_for_publish()
 
         # Update availability
-        client.publish(AVAILABILITY_TOPIC, "online", retain=True, qos=1)
+        result = client.publish(AVAILABILITY_TOPIC, "online", retain=True, qos=1)
+        result.wait_for_publish()
 
-        client.disconnect()
+        _disconnect(client)
         logger.info("MQTT tank data published")
         return True
 
     except Exception as e:
         logger.error("MQTT data publish failed: %s", e)
-        try:
-            client.disconnect()
-        except Exception:
-            pass
+        _disconnect(client)
         return False
 
 
@@ -200,8 +231,9 @@ def publish_offline(config: dict):
     if not client:
         return
     try:
-        client.publish(AVAILABILITY_TOPIC, "offline", retain=True, qos=1)
-        client.disconnect()
+        result = client.publish(AVAILABILITY_TOPIC, "offline", retain=True, qos=1)
+        result.wait_for_publish()
+        _disconnect(client)
     except Exception:
         pass
 
@@ -213,9 +245,6 @@ def test_mqtt_connection(config: dict) -> dict:
 
     client = _get_mqtt_client(config)
     if client:
-        try:
-            client.disconnect()
-            return {"success": True, "message": "MQTT connection successful"}
-        except Exception:
-            pass
+        _disconnect(client)
+        return {"success": True, "message": "MQTT connection successful"}
     return {"success": False, "error": "Could not connect to MQTT broker"}
