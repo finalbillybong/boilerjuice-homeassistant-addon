@@ -124,7 +124,7 @@ async def lifespan(app: FastAPI):
             await refresh_task
         except asyncio.CancelledError:
             pass
-    await scraper.close()
+    scraper.close()
 
 
 # ── FastAPI App ──────────────────────────────────────────────

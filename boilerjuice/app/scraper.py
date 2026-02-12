@@ -1,25 +1,30 @@
 """
 BoilerJuice Scraper Module
 
-Uses Playwright with a persistent browser context to authenticate with
-BoilerJuice (including solving AWS WAF CAPTCHA via remote browser UI)
-and fetch tank data.
+Uses Selenium with system Chromium to authenticate with BoilerJuice
+(including solving AWS WAF CAPTCHA via remote browser UI) and fetch
+tank data.
 
-The persistent context stores cookies/session so the user only needs
-to solve CAPTCHA occasionally (when the WAF token expires).
+Cookies are persisted to disk so the user only needs to solve CAPTCHA
+occasionally (when the WAF token expires).
 """
 
-import asyncio
 import base64
 import json
 import logging
 import os
 import re
+import threading
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Optional
 
-from playwright.async_api import async_playwright, Browser, BrowserContext, Page
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.action_chains import ActionChains
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +35,7 @@ DASHBOARD_URL = "https://www.boilerjuice.com/uk/users/dashboard"
 MY_ACCOUNT_URL = "https://www.boilerjuice.com/my-account"
 
 DATA_DIR = os.environ.get("DATA_DIR", "/data")
-BROWSER_DATA_DIR = os.path.join(DATA_DIR, "browser_context")
+COOKIE_FILE = os.path.join(DATA_DIR, "cookies.json")
 HISTORY_FILE = os.path.join(DATA_DIR, "history.json")
 
 # Page detection constants
@@ -77,125 +82,115 @@ class TankData:
 
 
 class BoilerJuiceScraper:
-    """Manages Playwright browser for BoilerJuice interaction."""
+    """Manages Selenium browser for BoilerJuice interaction."""
 
     def __init__(self):
-        self._playwright = None
-        self._browser: Optional[Browser] = None
-        self._context: Optional[BrowserContext] = None
-        self._page: Optional[Page] = None
+        self._driver: Optional[webdriver.Chrome] = None
+        self._lock = threading.Lock()
         self._auth_in_progress = False
         self._last_tank_data: Optional[TankData] = None
         self._last_error: Optional[str] = None
 
-    async def _ensure_browser(self):
-        """Launch browser if not already running."""
-        if self._playwright is None:
-            self._playwright = await async_playwright().start()
+    def _create_driver(self) -> webdriver.Chrome:
+        """Create a new Chrome/Chromium WebDriver instance."""
+        chrome_options = Options()
+        chrome_options.add_argument("--headless=new")
+        chrome_options.add_argument("--no-sandbox")
+        chrome_options.add_argument("--disable-dev-shm-usage")
+        chrome_options.add_argument("--disable-gpu")
+        chrome_options.add_argument("--window-size=1280,800")
+        chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+        chrome_options.add_argument("--lang=en-GB")
+        chrome_options.add_argument(
+            "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        )
 
-        if self._browser is None or not self._browser.is_connected():
-            # Detect system Chromium (used in Docker/HA add-on)
-            launch_kwargs = {
-                "headless": True,
-                "args": [
-                    "--disable-blink-features=AutomationControlled",
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-gpu",
-                ],
-            }
+        # Use system chromium-browser if available
+        chrome_bin = os.environ.get("CHROME_BIN")
+        if chrome_bin and os.path.exists(chrome_bin):
+            chrome_options.binary_location = chrome_bin
+        elif os.path.exists("/usr/bin/chromium-browser"):
+            chrome_options.binary_location = "/usr/bin/chromium-browser"
+        elif os.path.exists("/usr/bin/chromium"):
+            chrome_options.binary_location = "/usr/bin/chromium"
 
-            # Use system Chromium if available (Docker/Alpine)
-            chromium_path = os.environ.get("PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH")
-            if chromium_path and os.path.exists(chromium_path):
-                launch_kwargs["executable_path"] = chromium_path
-                logger.info("Using system Chromium at %s", chromium_path)
-            elif os.path.exists("/usr/bin/chromium-browser"):
-                launch_kwargs["executable_path"] = "/usr/bin/chromium-browser"
-                logger.info("Using system Chromium at /usr/bin/chromium-browser")
-            elif os.path.exists("/usr/bin/chromium"):
-                launch_kwargs["executable_path"] = "/usr/bin/chromium"
-                logger.info("Using system Chromium at /usr/bin/chromium")
+        # Use system chromedriver if available
+        chromedriver_path = os.environ.get("CHROMEDRIVER_PATH")
+        if chromedriver_path and os.path.exists(chromedriver_path):
+            service = Service(executable_path=chromedriver_path)
+        elif os.path.exists("/usr/bin/chromedriver"):
+            service = Service(executable_path="/usr/bin/chromedriver")
+        else:
+            service = Service()
 
-            self._browser = await self._playwright.chromium.launch(**launch_kwargs)
+        # Hide webdriver flag
+        chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        chrome_options.add_experimental_option("useAutomationExtension", False)
 
-        if self._context is None:
-            # Use persistent-like context by saving/loading cookies
-            self._context = await self._browser.new_context(
-                user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/120.0.0.0 Safari/537.36"
-                ),
-                viewport={"width": 1280, "height": 800},
-                locale="en-GB",
-            )
+        driver = webdriver.Chrome(service=service, options=chrome_options)
+        driver.execute_cdp_cmd(
+            "Page.addScriptToEvaluateOnNewDocument",
+            {"source": "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"},
+        )
+        driver.set_page_load_timeout(30)
+        driver.implicitly_wait(3)
+        return driver
 
-            # Hide webdriver flag
-            await self._context.add_init_script("""
-                Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-                window.chrome = { runtime: {} };
-                Object.defineProperty(navigator, 'plugins', {
-                    get: () => [1, 2, 3, 4, 5],
-                });
-                Object.defineProperty(navigator, 'languages', {
-                    get: () => ['en-GB', 'en-US', 'en'],
-                });
-            """)
+    def _ensure_driver(self):
+        """Ensure we have a running driver."""
+        if self._driver is None:
+            self._driver = self._create_driver()
+            self._load_cookies()
 
-            # Restore cookies from persistent storage
-            await self._load_cookies()
-
-        if self._page is None or self._page.is_closed():
-            self._page = await self._context.new_page()
-
-    async def _save_cookies(self):
-        """Save cookies to persistent storage."""
-        if self._context is None:
+    def _save_cookies(self):
+        """Save browser cookies to persistent storage."""
+        if self._driver is None:
             return
         try:
-            cookies = await self._context.cookies()
-            cookie_file = os.path.join(DATA_DIR, "cookies.json")
+            cookies = self._driver.get_cookies()
             os.makedirs(DATA_DIR, exist_ok=True)
-            with open(cookie_file, "w") as f:
+            with open(COOKIE_FILE, "w") as f:
                 json.dump(cookies, f, indent=2)
-            logger.info("Saved %d cookies to %s", len(cookies), cookie_file)
+            logger.info("Saved %d cookies", len(cookies))
         except Exception as e:
             logger.error("Failed to save cookies: %s", e)
 
-    async def _load_cookies(self):
-        """Load cookies from persistent storage."""
-        if self._context is None:
+    def _load_cookies(self):
+        """Load cookies into the browser from persistent storage."""
+        if self._driver is None or not os.path.exists(COOKIE_FILE):
             return
-        cookie_file = os.path.join(DATA_DIR, "cookies.json")
-        if os.path.exists(cookie_file):
-            try:
-                with open(cookie_file, "r") as f:
-                    cookies = json.load(f)
-                if cookies:
-                    await self._context.add_cookies(cookies)
-                    logger.info("Loaded %d cookies from %s", len(cookies), cookie_file)
-            except Exception as e:
-                logger.error("Failed to load cookies: %s", e)
+        try:
+            with open(COOKIE_FILE, "r") as f:
+                cookies = json.load(f)
+            if not cookies:
+                return
+            # Navigate to the domain first so we can set cookies
+            self._driver.get("https://www.boilerjuice.com")
+            import time
+            time.sleep(1)
+            for cookie in cookies:
+                # Remove problematic fields that Selenium doesn't accept
+                for key in ["sameSite", "httpOnly", "expiry"]:
+                    cookie.pop(key, None)
+                try:
+                    self._driver.add_cookie(cookie)
+                except Exception:
+                    pass
+            logger.info("Loaded %d cookies", len(cookies))
+        except Exception as e:
+            logger.error("Failed to load cookies: %s", e)
 
-    async def close(self):
+    def close(self):
         """Close browser and cleanup."""
         try:
-            if self._page and not self._page.is_closed():
-                await self._page.close()
-            if self._context:
-                await self._context.close()
-            if self._browser:
-                await self._browser.close()
-            if self._playwright:
-                await self._playwright.stop()
+            if self._driver:
+                self._driver.quit()
         except Exception as e:
             logger.error("Error closing browser: %s", e)
         finally:
-            self._page = None
-            self._context = None
-            self._browser = None
-            self._playwright = None
+            self._driver = None
 
     def _detect_page_type(self, html: str) -> str:
         """Detect what type of page we're on."""
@@ -208,28 +203,28 @@ class BoilerJuiceScraper:
             return "tank"
         return "unknown"
 
-    async def get_screenshot_base64(self) -> Optional[str]:
-        """Take a screenshot of the current page and return as base64."""
-        if self._page is None or self._page.is_closed():
+    def get_screenshot_base64(self) -> Optional[str]:
+        """Take a screenshot and return as base64."""
+        if self._driver is None:
             return None
         try:
-            screenshot_bytes = await self._page.screenshot(type="png")
-            return base64.b64encode(screenshot_bytes).decode("utf-8")
+            png = self._driver.get_screenshot_as_png()
+            return base64.b64encode(png).decode("utf-8")
         except Exception as e:
             logger.error("Screenshot failed: %s", e)
             return None
 
-    async def get_page_info(self) -> dict:
-        """Get info about the current page state."""
-        if self._page is None or self._page.is_closed():
+    def get_page_info(self) -> dict:
+        """Get info about the current page."""
+        if self._driver is None:
             return {"status": "no_page", "url": "", "page_type": "none"}
         try:
-            html = await self._page.content()
+            html = self._driver.page_source
             return {
                 "status": "ready",
-                "url": self._page.url,
+                "url": self._driver.current_url,
                 "page_type": self._detect_page_type(html),
-                "title": await self._page.title(),
+                "title": self._driver.title,
             }
         except Exception as e:
             return {"status": "error", "error": str(e)}
@@ -237,26 +232,18 @@ class BoilerJuiceScraper:
     # ── Auth flow (remote browser for CAPTCHA solving) ──────────────
 
     async def start_auth(self) -> dict:
-        """
-        Start the authentication flow. Navigate to the login page
-        and return a screenshot for the user to interact with.
-        """
+        """Start authentication — navigate to login page."""
         self._auth_in_progress = True
         self._last_error = None
         try:
-            await self._ensure_browser()
-            await self._page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=30000)
-            # Wait a bit for WAF challenge JS to execute
-            await asyncio.sleep(3)
+            self._ensure_driver()
+            self._driver.get(LOGIN_URL)
+            import time
+            time.sleep(3)  # Wait for WAF challenge JS
 
-            screenshot = await self.get_screenshot_base64()
-            page_info = await self.get_page_info()
-
-            return {
-                "success": True,
-                "screenshot": screenshot,
-                "page_info": page_info,
-            }
+            screenshot = self.get_screenshot_base64()
+            page_info = self.get_page_info()
+            return {"success": True, "screenshot": screenshot, "page_info": page_info}
         except Exception as e:
             self._last_error = str(e)
             logger.error("Auth start failed: %s", e)
@@ -264,106 +251,132 @@ class BoilerJuiceScraper:
 
     async def auth_click(self, x: int, y: int) -> dict:
         """Click at coordinates on the page (for CAPTCHA solving)."""
-        if self._page is None or self._page.is_closed():
-            return {"success": False, "error": "No active page"}
+        if self._driver is None:
+            return {"success": False, "error": "No active browser"}
         try:
-            await self._page.mouse.click(x, y)
-            await asyncio.sleep(1)  # Wait for page reaction
-            screenshot = await self.get_screenshot_base64()
-            page_info = await self.get_page_info()
+            actions = ActionChains(self._driver)
+            # Move to absolute position on the page using JavaScript
+            self._driver.execute_script(
+                f"document.elementFromPoint({x}, {y}).click();"
+            )
+            import time
+            time.sleep(1.5)
+            screenshot = self.get_screenshot_base64()
+            page_info = self.get_page_info()
             return {"success": True, "screenshot": screenshot, "page_info": page_info}
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            # Fallback: try ActionChains click
+            try:
+                body = self._driver.find_element(By.TAG_NAME, "body")
+                actions = ActionChains(self._driver)
+                actions.move_to_element_with_offset(body, x, y).click().perform()
+                import time
+                time.sleep(1.5)
+                screenshot = self.get_screenshot_base64()
+                page_info = self.get_page_info()
+                return {"success": True, "screenshot": screenshot, "page_info": page_info}
+            except Exception as e2:
+                return {"success": False, "error": str(e2)}
 
     async def auth_type(self, text: str) -> dict:
-        """Type text on the current page."""
-        if self._page is None or self._page.is_closed():
-            return {"success": False, "error": "No active page"}
+        """Type text into the focused element."""
+        if self._driver is None:
+            return {"success": False, "error": "No active browser"}
         try:
-            await self._page.keyboard.type(text, delay=50)
-            await asyncio.sleep(0.5)
-            screenshot = await self.get_screenshot_base64()
-            page_info = await self.get_page_info()
+            active = self._driver.switch_to.active_element
+            active.send_keys(text)
+            import time
+            time.sleep(0.5)
+            screenshot = self.get_screenshot_base64()
+            page_info = self.get_page_info()
             return {"success": True, "screenshot": screenshot, "page_info": page_info}
         except Exception as e:
             return {"success": False, "error": str(e)}
 
     async def auth_press_key(self, key: str) -> dict:
-        """Press a keyboard key (e.g., 'Enter', 'Tab')."""
-        if self._page is None or self._page.is_closed():
-            return {"success": False, "error": "No active page"}
+        """Press a keyboard key."""
+        if self._driver is None:
+            return {"success": False, "error": "No active browser"}
         try:
-            await self._page.keyboard.press(key)
-            await asyncio.sleep(1)
-            screenshot = await self.get_screenshot_base64()
-            page_info = await self.get_page_info()
+            from selenium.webdriver.common.keys import Keys
+            key_map = {
+                "Enter": Keys.RETURN,
+                "Tab": Keys.TAB,
+                "Escape": Keys.ESCAPE,
+            }
+            selenium_key = key_map.get(key, key)
+            active = self._driver.switch_to.active_element
+            active.send_keys(selenium_key)
+            import time
+            time.sleep(1)
+            screenshot = self.get_screenshot_base64()
+            page_info = self.get_page_info()
             return {"success": True, "screenshot": screenshot, "page_info": page_info}
         except Exception as e:
             return {"success": False, "error": str(e)}
 
     async def auth_fill_login(self, email: str, password: str) -> dict:
-        """
-        Attempt to fill and submit the login form.
-        Only works if we're on the actual login page (not CAPTCHA).
-        """
-        if self._page is None or self._page.is_closed():
-            return {"success": False, "error": "No active page"}
+        """Fill and submit the login form."""
+        if self._driver is None:
+            return {"success": False, "error": "No active browser"}
 
         try:
-            html = await self._page.content()
+            html = self._driver.page_source
             page_type = self._detect_page_type(html)
 
             if page_type == "captcha":
                 return {
                     "success": False,
                     "error": "CAPTCHA detected. Please solve it first using the remote browser.",
-                    "page_info": await self.get_page_info(),
-                    "screenshot": await self.get_screenshot_base64(),
+                    "page_info": self.get_page_info(),
+                    "screenshot": self.get_screenshot_base64(),
                 }
 
             if page_type != "login":
                 return {
                     "success": False,
-                    "error": f"Not on login page (detected: {page_type}). Current URL: {self._page.url}",
-                    "page_info": await self.get_page_info(),
-                    "screenshot": await self.get_screenshot_base64(),
+                    "error": f"Not on login page (detected: {page_type}). URL: {self._driver.current_url}",
+                    "page_info": self.get_page_info(),
+                    "screenshot": self.get_screenshot_base64(),
                 }
 
             # Fill email
-            email_field = await self._page.query_selector(
-                'input[name="user[email]"], input[type="email"], input#user_email'
-            )
-            if email_field:
-                await email_field.fill(email)
+            try:
+                email_field = self._driver.find_element(By.CSS_SELECTOR,
+                    'input[name="user[email]"], input[type="email"], input#user_email')
+                email_field.clear()
+                email_field.send_keys(email)
+            except Exception:
+                pass
 
             # Fill password
-            password_field = await self._page.query_selector(
-                'input[name="user[password]"], input[type="password"], input#user_password'
-            )
-            if password_field:
-                await password_field.fill(password)
+            try:
+                password_field = self._driver.find_element(By.CSS_SELECTOR,
+                    'input[name="user[password]"], input[type="password"], input#user_password')
+                password_field.clear()
+                password_field.send_keys(password)
+            except Exception:
+                pass
 
             # Submit
-            submit_btn = await self._page.query_selector(
-                'input[type="submit"], button[type="submit"], '
-                'button:has-text("Log"), input[value*="Log"]'
-            )
-            if submit_btn:
-                await submit_btn.click()
-            else:
-                await self._page.keyboard.press("Enter")
+            try:
+                submit_btn = self._driver.find_element(By.CSS_SELECTOR,
+                    'input[type="submit"], button[type="submit"]')
+                submit_btn.click()
+            except Exception:
+                from selenium.webdriver.common.keys import Keys
+                password_field.send_keys(Keys.RETURN)
 
-            await self._page.wait_for_load_state("networkidle", timeout=15000)
-            await asyncio.sleep(2)
+            import time
+            time.sleep(5)
 
             # Save cookies after login
-            await self._save_cookies()
+            self._save_cookies()
 
-            screenshot = await self.get_screenshot_base64()
-            page_info = await self.get_page_info()
+            screenshot = self.get_screenshot_base64()
+            page_info = self.get_page_info()
 
-            # Check if we landed on another CAPTCHA or error
-            new_html = await self._page.content()
+            new_html = self._driver.page_source
             new_type = self._detect_page_type(new_html)
             logged_in = new_type not in ("captcha", "login")
 
@@ -383,25 +396,23 @@ class BoilerJuiceScraper:
     async def finish_auth(self):
         """Mark auth as complete and save session."""
         self._auth_in_progress = False
-        await self._save_cookies()
+        self._save_cookies()
 
     # ── Data fetching ───────────────────────────────────────────────
 
     async def fetch_tank_data(self, tank_id: str) -> dict:
-        """
-        Fetch tank data from BoilerJuice.
-        Returns tank data dict on success, error dict on failure.
-        """
+        """Fetch tank data from BoilerJuice."""
         try:
-            await self._ensure_browser()
+            self._ensure_driver()
 
             tank_url = TANK_URL_TEMPLATE.format(tank_id=tank_id)
             logger.info("Fetching tank data from %s", tank_url)
 
-            await self._page.goto(tank_url, wait_until="networkidle", timeout=30000)
-            await asyncio.sleep(2)
+            self._driver.get(tank_url)
+            import time
+            time.sleep(3)
 
-            html = await self._page.content()
+            html = self._driver.page_source
             page_type = self._detect_page_type(html)
 
             if page_type == "captcha":
@@ -418,160 +429,156 @@ class BoilerJuiceScraper:
                     "needs_auth": True,
                 }
 
-            # Try to extract tank data from the page
-            tank_data = await self._extract_tank_data()
+            tank_data = self._extract_tank_data()
 
             if tank_data:
                 self._last_tank_data = tank_data
-                await self._save_cookies()
+                self._save_cookies()
                 self._save_history(tank_data)
                 return {"success": True, "data": tank_data.to_dict()}
-            else:
-                # Maybe we need to try a different URL pattern
-                for alt_url in [
-                    f"https://www.boilerjuice.com/uk/users/tanks/{tank_id}",
-                    DASHBOARD_URL,
-                    MY_ACCOUNT_URL,
-                ]:
-                    logger.info("Trying alternative URL: %s", alt_url)
-                    await self._page.goto(alt_url, wait_until="networkidle", timeout=20000)
-                    await asyncio.sleep(2)
-                    tank_data = await self._extract_tank_data()
-                    if tank_data:
-                        self._last_tank_data = tank_data
-                        await self._save_cookies()
-                        self._save_history(tank_data)
-                        return {"success": True, "data": tank_data.to_dict()}
 
-                # Last resort: return page text for debugging
-                text = await self._page.inner_text("body")
-                return {
-                    "success": False,
-                    "error": "Could not extract tank data from page.",
-                    "page_text_preview": text[:500],
-                    "url": self._page.url,
-                }
+            # Try alternative URLs
+            for alt_url in [
+                f"https://www.boilerjuice.com/uk/users/tanks/{tank_id}",
+                DASHBOARD_URL,
+                MY_ACCOUNT_URL,
+            ]:
+                logger.info("Trying alternative URL: %s", alt_url)
+                self._driver.get(alt_url)
+                time.sleep(3)
+                tank_data = self._extract_tank_data()
+                if tank_data:
+                    self._last_tank_data = tank_data
+                    self._save_cookies()
+                    self._save_history(tank_data)
+                    return {"success": True, "data": tank_data.to_dict()}
+
+            # Last resort: return page text
+            try:
+                text = self._driver.find_element(By.TAG_NAME, "body").text
+            except Exception:
+                text = ""
+            return {
+                "success": False,
+                "error": "Could not extract tank data from page.",
+                "page_text_preview": text[:500],
+                "url": self._driver.current_url,
+            }
 
         except Exception as e:
             logger.error("Fetch tank data failed: %s", e)
             return {"success": False, "error": str(e)}
 
-    async def _extract_tank_data(self) -> Optional[TankData]:
+    def _extract_tank_data(self) -> Optional[TankData]:
         """Try to extract tank data from the current page."""
         try:
-            html = await self._page.content()
-            text = await self._page.inner_text("body")
+            html = self._driver.page_source
+            try:
+                text = self._driver.find_element(By.TAG_NAME, "body").text
+            except Exception:
+                text = ""
 
-            # Method 1: Try the original XPath-style selectors via Playwright
             data = {}
 
-            # Try to find tank level elements
+            # Method 1: Try specific selectors
             try:
-                usable_oil = await self._page.query_selector("#usable-oil, [id*='usable-oil']")
-                if usable_oil:
-                    usable_text = await usable_oil.inner_text()
-                    litres_match = re.search(r"([\d,]+\.?\d*)\s*litres", usable_text, re.IGNORECASE)
-                    if litres_match:
-                        data["litres"] = float(litres_match.group(1).replace(",", ""))
+                el = self._driver.find_element(By.CSS_SELECTOR, "#usable-oil, [id*='usable-oil']")
+                usable_text = el.text
+                m = re.search(r"([\d,]+\.?\d*)\s*litres", usable_text, re.IGNORECASE)
+                if m:
+                    data["litres"] = float(m.group(1).replace(",", ""))
             except Exception:
                 pass
 
             try:
-                total_oil = await self._page.query_selector("#total-oil, [id*='total-oil']")
-                if total_oil:
-                    total_text = await total_oil.inner_text()
-                    litres_match = re.search(r"([\d,]+\.?\d*)\s*litres", total_text, re.IGNORECASE)
-                    if litres_match:
-                        data["total_litres"] = float(litres_match.group(1).replace(",", ""))
+                el = self._driver.find_element(By.CSS_SELECTOR, "#total-oil, [id*='total-oil']")
+                total_text = el.text
+                m = re.search(r"([\d,]+\.?\d*)\s*litres", total_text, re.IGNORECASE)
+                if m:
+                    data["total_litres"] = float(m.group(1).replace(",", ""))
             except Exception:
                 pass
 
             try:
-                capacity_el = await self._page.query_selector(
-                    "input[title='tank-size-count'], [data-tank-size], [class*='capacity']"
-                )
-                if capacity_el:
-                    capacity_val = await capacity_el.get_attribute("value")
-                    if capacity_val:
-                        data["capacity"] = float(capacity_val.replace(",", ""))
+                el = self._driver.find_element(By.CSS_SELECTOR,
+                    "input[title='tank-size-count'], [data-tank-size], [class*='capacity']")
+                val = el.get_attribute("value")
+                if val:
+                    data["capacity"] = float(val.replace(",", ""))
             except Exception:
                 pass
 
-            # Try percentage from data attributes
             try:
-                pct_el = await self._page.query_selector("[data-percentage]")
-                if pct_el:
-                    pct = await pct_el.get_attribute("data-percentage")
-                    if pct:
-                        data["percent"] = float(pct)
+                el = self._driver.find_element(By.CSS_SELECTOR, "[data-percentage]")
+                pct = el.get_attribute("data-percentage")
+                if pct:
+                    data["percent"] = float(pct)
             except Exception:
                 pass
 
-            # Method 2: Try regex on the full page text
+            # Method 2: Regex on page text
             if not data.get("litres"):
-                litres_patterns = [
+                patterns = [
                     r"you have\s+([\d,]+\.?\d*)\s*litres?\s+of usable oil",
                     r"([\d,]+\.?\d*)\s*litres?\s+(?:of\s+)?usable",
                     r"usable[:\s]+([\d,]+\.?\d*)\s*(?:litres?|L)",
                     r"([\d,]+\.?\d*)\s*litres?\s+remaining",
                 ]
-                for pattern in litres_patterns:
-                    match = re.search(pattern, text, re.IGNORECASE)
-                    if match:
-                        data["litres"] = float(match.group(1).replace(",", ""))
+                for p in patterns:
+                    m = re.search(p, text, re.IGNORECASE)
+                    if m:
+                        data["litres"] = float(m.group(1).replace(",", ""))
                         break
 
             if not data.get("total_litres"):
-                total_patterns = [
+                patterns = [
                     r"you have\s+([\d,]+\.?\d*)\s*litres?\s+of oil",
                     r"total[:\s]+([\d,]+\.?\d*)\s*(?:litres?|L)",
                     r"([\d,]+\.?\d*)\s*litres?\s+total",
                 ]
-                for pattern in total_patterns:
-                    match = re.search(pattern, text, re.IGNORECASE)
-                    if match:
-                        data["total_litres"] = float(match.group(1).replace(",", ""))
+                for p in patterns:
+                    m = re.search(p, text, re.IGNORECASE)
+                    if m:
+                        data["total_litres"] = float(m.group(1).replace(",", ""))
                         break
 
             if not data.get("capacity"):
-                cap_patterns = [
+                patterns = [
                     r"capacity[:\s]+([\d,]+\.?\d*)\s*(?:litres?|L)?",
                     r"tank\s+size[:\s]+([\d,]+\.?\d*)",
                     r"([\d,]+\.?\d*)\s*(?:litres?\s+)?capacity",
                 ]
-                for pattern in cap_patterns:
-                    match = re.search(pattern, text, re.IGNORECASE)
-                    if match:
-                        data["capacity"] = float(match.group(1).replace(",", ""))
+                for p in patterns:
+                    m = re.search(p, text, re.IGNORECASE)
+                    if m:
+                        data["capacity"] = float(m.group(1).replace(",", ""))
                         break
 
             if not data.get("percent"):
-                pct_patterns = [
+                patterns = [
                     r"(\d+(?:\.\d+)?)\s*%",
                     r"percentage[:\s]+(\d+(?:\.\d+)?)",
                 ]
-                for pattern in pct_patterns:
-                    match = re.search(pattern, text, re.IGNORECASE)
-                    if match:
-                        data["percent"] = float(match.group(1))
+                for p in patterns:
+                    m = re.search(p, text, re.IGNORECASE)
+                    if m:
+                        data["percent"] = float(m.group(1))
                         break
 
-            # Method 3: Try to find data in JavaScript variables / JSON in the page
+            # Method 3: Look for JSON in script tags
             try:
-                scripts = await self._page.query_selector_all("script")
+                scripts = self._driver.find_elements(By.TAG_NAME, "script")
                 for script in scripts:
-                    script_text = await script.inner_text()
-                    # Look for JSON data embedded in scripts
+                    script_text = script.get_attribute("innerHTML") or ""
                     json_matches = re.findall(r'\{[^{}]*"litres?"[^{}]*\}', script_text, re.IGNORECASE)
                     for json_str in json_matches:
                         try:
                             json_data = json.loads(json_str)
-                            if "litres" in json_data or "litre" in json_data:
-                                if "litres" in json_data:
-                                    data["litres"] = float(json_data["litres"])
-                                if "capacity" in json_data:
-                                    data["capacity"] = float(json_data["capacity"])
-                                break
+                            if "litres" in json_data:
+                                data["litres"] = float(json_data["litres"])
+                            if "capacity" in json_data:
+                                data["capacity"] = float(json_data["capacity"])
+                            break
                         except (json.JSONDecodeError, ValueError):
                             pass
             except Exception:
@@ -579,7 +586,6 @@ class BoilerJuiceScraper:
 
             # Check if we got meaningful data
             if data.get("litres") or data.get("percent"):
-                # Determine level name from percentage
                 pct = data.get("percent", 0)
                 if pct >= 60:
                     level_name = "High"
@@ -628,7 +634,6 @@ class BoilerJuiceScraper:
         """Get the last fetched tank data."""
         if self._last_tank_data:
             return self._last_tank_data.to_dict()
-        # Try loading from history
         try:
             if os.path.exists(HISTORY_FILE):
                 with open(HISTORY_FILE, "r") as f:
