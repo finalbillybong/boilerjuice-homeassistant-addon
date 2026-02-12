@@ -1,5 +1,5 @@
 name: "BoilerJuice Tank Monitor"
-version: "1.0.8"
+version: "1.0.9"
 slug: "boilerjuice"
 description: "Monitor your BoilerJuice oil tank level with a modern web UI, CAPTCHA-aware login, and MQTT auto-discovery for Home Assistant sensors."
 url: "https://github.com/finalbillybong/boilerjuice-homeassistant-addon"

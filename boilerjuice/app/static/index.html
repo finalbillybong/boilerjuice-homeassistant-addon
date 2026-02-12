@@ -210,6 +210,8 @@
             <option value="60" selected>Every 1 hour</option>
             <option value="120">Every 2 hours</option>
             <option value="240">Every 4 hours</option>
+            <option value="720">Every 12 hours</option>
+            <option value="1440">Every 24 hours</option>
             <option value="0">Disabled (manual only)</option>
           </select>
         </div>
@@ -251,6 +253,41 @@
               <button class="toggle-password" onclick="togglePassword('mqttPassword', this)"
                       type="button">👁️</button>
             </div>
+          </div>
+
+          <!-- MQTT Entities Reference -->
+          <div class="mqtt-entities-info">
+            <div class="mqtt-entities-title">HA Entities Created</div>
+            <p class="form-hint" style="margin-bottom:10px;">
+              Once enabled and data is fetched, these sensors appear under the
+              <strong>BoilerJuice Oil Tank</strong> device in Home Assistant:
+            </p>
+            <table class="mqtt-entities-table">
+              <thead>
+                <tr><th>Entity ID</th><th>Name</th><th>Unit</th></tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><code>sensor.boilerjuice_oil_remaining</code></td>
+                  <td>Oil Remaining</td>
+                  <td>L</td>
+                </tr>
+                <tr>
+                  <td><code>sensor.boilerjuice_oil_percentage</code></td>
+                  <td>Oil Level</td>
+                  <td>%</td>
+                </tr>
+                <tr>
+                  <td><code>sensor.boilerjuice_tank_capacity</code></td>
+                  <td>Tank Capacity</td>
+                  <td>L</td>
+                </tr>
+              </tbody>
+            </table>
+            <p class="form-hint" style="margin-top:8px;">
+              State topic: <code>boilerjuice/tank/state</code>
+            </p>
+            <div id="mqttStatus" class="mqtt-status" style="display:none;"></div>
           </div>
         </div>
       </div>

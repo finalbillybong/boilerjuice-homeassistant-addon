@@ -546,6 +546,87 @@ body {
   margin-top: 4px;
 }
 
+/* ── MQTT Entities Info ──────────────────────────────────── */
+
+.mqtt-entities-info {
+  margin-top: 20px;
+  padding: 16px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.mqtt-entities-title {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 8px;
+}
+
+.mqtt-entities-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8rem;
+}
+
+.mqtt-entities-table th {
+  text-align: left;
+  padding: 6px 8px;
+  color: var(--text-muted);
+  font-weight: 500;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.mqtt-entities-table td {
+  padding: 8px 8px;
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--border);
+}
+
+.mqtt-entities-table tr:last-child td {
+  border-bottom: none;
+}
+
+.mqtt-entities-table code {
+  font-size: 0.75rem;
+  background: var(--bg-primary);
+  padding: 2px 6px;
+  border-radius: 4px;
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+.mqtt-entities-info code {
+  font-size: 0.75rem;
+  background: var(--bg-primary);
+  padding: 2px 6px;
+  border-radius: 4px;
+  color: var(--accent);
+}
+
+.mqtt-status {
+  margin-top: 10px;
+  padding: 8px 12px;
+  border-radius: var(--radius-xs);
+  font-size: 0.8rem;
+  font-weight: 500;
+}
+
+.mqtt-status.success {
+  background: rgba(45, 212, 160, 0.1);
+  color: var(--success);
+}
+
+.mqtt-status.error {
+  background: rgba(239, 68, 68, 0.1);
+  color: var(--danger);
+}
+
 /* ── Card Component ──────────────────────────────────────── */
 
 .card {
