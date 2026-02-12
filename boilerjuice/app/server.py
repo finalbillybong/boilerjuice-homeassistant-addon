@@ -21,10 +21,11 @@ from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
+from starlette.middleware.base import BaseHTTPMiddleware
 
 # Add app directory to path
 APP_DIR = Path(__file__).parent
+STATIC_DIR = APP_DIR / "static"
 sys.path.insert(0, str(APP_DIR))
 
 from scraper import BoilerJuiceScraper
@@ -86,7 +87,6 @@ async def auto_refresh_loop():
 
             if result.get("success"):
                 logger.info("Auto-refresh: data fetched successfully")
-                # Publish to MQTT if configured
                 if config.get("mqtt_enabled"):
                     try:
                         from mqtt import publish_tank_data
@@ -102,7 +102,7 @@ async def auto_refresh_loop():
             break
         except Exception as e:
             logger.error("Auto-refresh error: %s", e)
-            await asyncio.sleep(300)  # Wait 5 min on error
+            await asyncio.sleep(300)
 
 
 @asynccontextmanager
@@ -110,13 +110,12 @@ async def lifespan(app: FastAPI):
     """Startup and shutdown lifecycle."""
     global refresh_task
     logger.info("BoilerJuice Tank Monitor starting up")
+    logger.info("Static directory: %s (exists: %s)", STATIC_DIR, STATIC_DIR.exists())
+    logger.info("Index file: %s (exists: %s)", STATIC_DIR / "index.html", (STATIC_DIR / "index.html").exists())
 
-    # Start auto-refresh background task
     refresh_task = asyncio.create_task(auto_refresh_loop())
-
     yield
 
-    # Shutdown
     logger.info("Shutting down")
     if refresh_task:
         refresh_task.cancel()
@@ -130,15 +129,58 @@ async def lifespan(app: FastAPI):
 # ── FastAPI App ──────────────────────────────────────────────
 app = FastAPI(title="BoilerJuice Tank Monitor", lifespan=lifespan)
 
-# Mount static files
-app.mount("/static", StaticFiles(directory=str(APP_DIR / "static")), name="static")
+
+# ── Request Logging Middleware ───────────────────────────────
+class RequestLoggingMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        logger.info("REQUEST: %s %s", request.method, request.url.path)
+        response = await call_next(request)
+        logger.info("RESPONSE: %s %s -> %d", request.method, request.url.path, response.status_code)
+        return response
+
+app.add_middleware(RequestLoggingMiddleware)
+
+
+# ── Static File Helper ───────────────────────────────────────
+MIME_TYPES = {
+    ".html": "text/html",
+    ".css": "text/css",
+    ".js": "application/javascript",
+    ".json": "application/json",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".svg": "image/svg+xml",
+    ".ico": "image/x-icon",
+}
+
+
+def serve_static(filename: str):
+    """Serve a static file by name."""
+    filepath = STATIC_DIR / filename
+    if filepath.exists() and filepath.is_file():
+        suffix = filepath.suffix.lower()
+        media_type = MIME_TYPES.get(suffix, "application/octet-stream")
+        return FileResponse(str(filepath), media_type=media_type)
+    return JSONResponse(status_code=404, content={"detail": f"File not found: {filename}"})
 
 
 # ── Web UI ───────────────────────────────────────────────────
-@app.get("/", response_class=HTMLResponse)
+@app.get("/")
 async def serve_ui():
     """Serve the main web UI."""
-    return FileResponse(str(APP_DIR / "static" / "index.html"))
+    return serve_static("index.html")
+
+
+@app.get("/index.html")
+async def serve_index():
+    """Serve index.html explicitly."""
+    return serve_static("index.html")
+
+
+@app.get("/static/{filepath:path}")
+async def serve_static_file(filepath: str):
+    """Serve static files (CSS, JS, images)."""
+    return serve_static(filepath)
 
 
 # ── Config Endpoints ─────────────────────────────────────────
@@ -146,7 +188,6 @@ async def serve_ui():
 async def get_config():
     """Get current configuration (passwords masked)."""
     config = load_config()
-    # Mask sensitive fields
     masked = {**config}
     masked["has_password"] = bool(config.get("password"))
     masked.pop("password", None)
@@ -164,7 +205,6 @@ async def set_config(request: Request):
         body = await request.json()
         config = load_config()
 
-        # Update fields
         for key in [
             "email", "tank_id", "refresh_interval",
             "mqtt_enabled", "mqtt_host", "mqtt_port", "mqtt_user",
@@ -172,7 +212,6 @@ async def set_config(request: Request):
             if key in body:
                 config[key] = body[key]
 
-        # Only update password if provided (not empty)
         if body.get("password"):
             config["password"] = body["password"]
         if body.get("mqtt_password"):
@@ -209,7 +248,6 @@ async def refresh_data():
 
     result = await scraper.fetch_tank_data(tank_id)
 
-    # Publish to MQTT if enabled and data was fetched
     if result.get("success") and config.get("mqtt_enabled"):
         try:
             from mqtt import publish_tank_data
@@ -230,7 +268,7 @@ async def get_history():
 # ── Auth / Remote Browser Endpoints ─────────────────────────
 @app.post("/api/auth/start")
 async def auth_start():
-    """Start the authentication flow (open login page in browser)."""
+    """Start the authentication flow."""
     result = await scraper.start_auth()
     return result
 
@@ -270,7 +308,6 @@ async def auth_fill_login(request: Request):
     email = body.get("email", "")
     password = body.get("password", "")
 
-    # If password is the placeholder, load from config
     if password == "__saved__":
         config = load_config()
         password = config.get("password", "")
@@ -300,7 +337,7 @@ async def auth_finish():
 @app.get("/api/auth/screenshot")
 async def auth_screenshot():
     """Get the current browser screenshot."""
-    screenshot = await scraper.get_screenshot_base64()
+    screenshot = scraper.get_screenshot_base64()
     if screenshot:
         return {"success": True, "screenshot": screenshot}
     return {"success": False, "error": "No screenshot available"}
@@ -309,7 +346,7 @@ async def auth_screenshot():
 @app.get("/api/auth/page-info")
 async def auth_page_info():
     """Get information about the current browser page."""
-    info = await scraper.get_page_info()
+    info = scraper.get_page_info()
     return info
 
 
@@ -322,6 +359,14 @@ async def health_check():
         "auth_in_progress": scraper.is_auth_in_progress,
         "has_data": scraper.get_last_data() is not None,
     }
+
+
+# ── Catch-all: serve index.html for SPA routing ─────────────
+@app.get("/{full_path:path}")
+async def catch_all(full_path: str):
+    """Catch-all route — serve index.html for any unmatched path."""
+    logger.info("Catch-all hit for path: /%s", full_path)
+    return serve_static("index.html")
 
 
 # ── Run ──────────────────────────────────────────────────────

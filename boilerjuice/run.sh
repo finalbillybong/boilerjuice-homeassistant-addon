@@ -20,5 +20,4 @@ cd /app
 exec python3 -m uvicorn server:app \
     --host 0.0.0.0 \
     --port "${PORT}" \
-    --log-level info \
-    --no-access-log
+    --log-level info
