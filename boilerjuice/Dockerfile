@@ -3,19 +3,14 @@ FROM $BUILD_FROM
 
 # Install system dependencies needed by Chromium
 RUN apk add --no-cache \
-    python3 \
-    py3-pip \
     bash \
+    chromium \
     nss \
     freetype \
-    freetype-dev \
     harfbuzz \
     ca-certificates \
     ttf-freefont \
-    font-noto-emoji \
-    chromium \
     dbus \
-    mesa-gl \
     libstdc++
 
 # Set environment for Chromium
@@ -27,7 +22,7 @@ WORKDIR /app
 
 # Install Python dependencies
 COPY requirements.txt .
-RUN pip3 install --no-cache-dir --break-system-packages -r requirements.txt
+RUN pip3 install --no-cache-dir -r requirements.txt
 
 # Copy application
 COPY app/ ./

@@ -1,4 +1,4 @@
-#!/usr/bin/env bashio
+#!/usr/bin/with-contenv bashio
 
 # BoilerJuice Tank Monitor - Add-on Entry Point
 
@@ -14,11 +14,11 @@ mkdir -p "${DATA_DIR}"
 
 # Check for MQTT service and auto-configure if available
 if bashio::services.available "mqtt"; then
-    bashio::log.info "MQTT service detected — auto-configuring..."
-    export MQTT_HOST=$(bashio::services mqtt "host")
-    export MQTT_PORT=$(bashio::services mqtt "port")
-    export MQTT_USER=$(bashio::services mqtt "username")
-    export MQTT_PASSWORD=$(bashio::services mqtt "password")
+    bashio::log.info "MQTT service detected - auto-configuring..."
+    export MQTT_HOST="$(bashio::services mqtt "host")"
+    export MQTT_PORT="$(bashio::services mqtt "port")"
+    export MQTT_USER="$(bashio::services mqtt "username")"
+    export MQTT_PASSWORD="$(bashio::services mqtt "password")"
     bashio::log.info "MQTT broker: ${MQTT_HOST}:${MQTT_PORT}"
 fi
 
